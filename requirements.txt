@@ -2,5 +2,5 @@ streamlit
 pandas
 openpyxl
 pypdf
-google-generativeai
+google-genai
 pillow
