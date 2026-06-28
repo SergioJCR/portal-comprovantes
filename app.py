@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from pypdf import PdfReader, PdfWriter
 import json
 import io
@@ -9,20 +10,22 @@ import time
 # Configuração da página web
 st.set_page_config(page_title="Plataforma Contábil IA", page_icon="🏢", layout="wide")
 
-# --- CHAVE API CONFIGURADA DIRETAMENTE ---
-# Certifique-se de colar sua chave real aqui dentro das aspas (ex: "AIza...")
-API_KEY = "AQ.Ab8RN6LX25euVKsKXdvKzolV8C2JMXIiDQWR40cU3ZTCeliE1A"
-
+# --- CONEXÃO COM A NOVA API DO GOOGLE ---
 def inicializar_ia():
-    if API_KEY in ["COLE_AQUI_A_SUA_CHAVE_COMPLETA", ""]:
-        st.error("⚠️ Token de API do Gemini não configurado.")
-        return False
+    if "GEMINI_KEY" in st.secrets:
+        token = st.secrets["GEMINI_KEY"]
+    else:
+        token = "COLE_AQUI_A_SUA_CHAVE_LOCAL" # Caso rode no PC
+        
+    if token in ["", "COLE_AQUI_A_SUA_CHAVE_LOCAL"]:
+        st.error("⚠️ Token de API do Gemini não localizado nos Secrets do Streamlit.")
+        return None
     try:
-        genai.configure(api_key=API_KEY)
-        return True
+        # Usa o cliente moderno de alta performance do Google
+        return genai.Client(api_key=token)
     except Exception as e:
-        st.error(f"Erro na IA: {e}")
-        return False
+        st.error(f"Erro ao conectar com servidor do Google: {e}")
+        return None
 
 # --- PROMPT CORPORATIVO BRASILEIRO ---
 PROMPT_CONTABIL = """
@@ -47,14 +50,15 @@ Retorne APENAS o JSON puro, sem markdown como ```json ou textos explicativos.
 """
 
 # --- MOTOR DE LEITURA BLINDADO EM LOTE ---
-def processar_arquivo_em_lote(arquivo_carregado):
-    model = genai.GenerativeModel('models/gemini-2.5-flash')
+def processar_arquivo_em_lote(client, arquivo_carregado):
+    # Força o uso do modelo mais rápido do mercado na nuvem
+    model_name = 'gemini-2.5-flash'
     lancamentos_arquivo = []
     
     if arquivo_carregado.type == "application/pdf":
         reader = PdfReader(arquivo_carregado)
         total_paginas = len(reader.pages)
-        tamanho_bloco = 10  # Reduzido para 10 páginas para evitar quedas de conexão
+        tamanho_bloco = 10
         
         for i in range(0, total_paginas, tamanho_bloco):
             writer = PdfWriter()
@@ -64,37 +68,46 @@ def processar_arquivo_em_lote(arquivo_carregado):
             buffer_bloco = io.BytesIO()
             writer.write(buffer_bloco)
             
-            documento_ia = {"mime_type": "application/pdf", "data": buffer_bloco.getvalue()}
+            documento_ia = types.Part.from_bytes(
+                data=buffer_bloco.getvalue(),
+                mime_type="application/pdf"
+            )
             
-            # Mecanismo de tentativas automáticas contra oscilações de rede
             resposta = None
             for tentativa in range(3):
                 try:
-                    resposta = model.generate_content([documento_ia, PROMPT_CONTABIL])
-                    if resposta and resposta.text:
+                    res = client.models.generate_content(
+                        model=model_name,
+                        contents=[documento_ia, PROMPT_CONTABIL]
+                    )
+                    if res and res.text:
+                        resposta = res
                         break
-                except Exception as e:
-                    if tentativa == 2:
-                        st.warning(f"⚠️ Instabilidade de rede na página {i+1}. Pulando bloco...")
-                    time.sleep(5) # Espera 5 segundos antes de tentar de novo
+                except Exception:
+                    time.sleep(5)
             
-            if resposta:
+            if respuesta:
                 try:
-                    texto_limpo = resposta.text.strip().replace("```json", "").replace("```", "")
+                    texto_limpo = respuesta.text.strip().replace("```json", "").replace("```", "")
                     bloco_json = json.loads(texto_limpo)
                     if isinstance(bloco_json, list):
                         lancamentos_arquivo.extend(bloco_json)
                 except:
                     continue
             
-            # Pausa de segurança para respeitar a cota do plano gratuito do Google
             time.sleep(12)
     else:
         bytes_imagem = arquivo_carregado.read()
-        documento_ia = {"mime_type": arquivo_carregado.type, "data": bytes_imagem}
+        documento_ia = types.Part.from_bytes(
+            data=bytes_imagem,
+            mime_type=arquivo_carregado.type
+        )
         try:
-            resposta = model.generate_content([documento_ia, PROMPT_CONTABIL])
-            texto_limpo = resposta.text.strip().replace("```json", "").replace("```", "")
+            res = client.models.generate_content(
+                model=model_name,
+                contents=[documento_ia, PROMPT_CONTABIL]
+            )
+            texto_limpo = res.text.strip().replace("```json", "").replace("```", "")
             lancamentos_arquivo = json.loads(texto_limpo)
         except:
             pass
@@ -136,7 +149,8 @@ if arquivos_lote:
     st.info(f"📂 Total de documentos na fila: {len(arquivos_lote)} arquivo(s).")
     
     if st.button("🚀 Iniciar Processamento Estruturado em Massa", type="primary", use_container_width=True):
-        if inicializar_ia():
+        client_ia = inicializar_ia()
+        if client_ia:
             todos_dados_combinados = []
             barra_lote = st.progress(0, text="Preparando motores contábeis...")
             
@@ -144,7 +158,7 @@ if arquivos_lote:
                 porcentagem = (index + 1) / len(arquivos_lote)
                 barra_lote.progress(porcentagem, text=f"Processando arquivo {index + 1} de {len(arquivos_lote)}: {arquivo.name}")
                 
-                resultado_arquivo = processar_arquivo_em_lote(arquivo)
+                resultado_arquivo = processar_arquivo_em_lote(client_ia, arquivo)
                 if isinstance(resultado_arquivo, list):
                     todos_dados_combinados.extend(resultado_arquivo)
                 elif isinstance(resultado_arquivo, dict):
